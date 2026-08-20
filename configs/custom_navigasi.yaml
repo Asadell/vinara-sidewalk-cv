@@ -1,0 +1,48 @@
+# Konfigurasi dataset YOLO11n - Deteksi Bahaya Jalanan (Mode Navigasi)
+#
+# CATATAN PENTING soal path:
+#   Versi lama meng-hardcode path absolut mesin developer:
+#     /home/asadel/kuliah/lomba/smstr6/guido/dataset_sidewalk/dataset_master_yolo
+#   Itu langsung pecah begitu dijalankan di Colab, Kaggle, Vast.ai, atau
+#   laptop anggota tim lain. Sekarang defaultnya RELATIF terhadap lokasi
+#   file yaml ini, jadi portabel.
+#
+#   Kalau dataset kamu ada di tempat lain, timpa lewat CLI tanpa mengedit
+#   file ini:
+#     python scripts/05_train_yolo.py --data /path/ke/data.yaml
+#   atau ubah baris `path:` di bawah.
+
+path: ../dataset_master_yolo
+train: images/train
+val:   images/valid
+test:  images/test
+
+# 6 kelas target. tangga_naik dan tangga_turun sengaja DIGABUNG jadi satu
+# kelas 'tangga', karena dataset sumber (SafeWalkBD) tidak membedakannya.
+# Membuat dua kelas di mana salah satunya nol sampel cuma menghasilkan
+# kelas mati yang menurunkan mAP rata-rata tanpa manfaat apa pun.
+nc: 6
+names:
+  0: lubang        # pothole / lubang trotoar / lubang aspal
+  1: got_terbuka   # manhole tanpa tutup / selokan terbuka
+  2: tangga        # tangga naik maupun turun
+  3: orang         # person / pedestrian
+  4: motor         # kendaraan bermotor (motor, mobil, bus, truk)
+  5: tiang         # pole / tiang listrik / gerobak PKL / obstacle
+
+# ─────────────────────────────────────────────────────────────────────────
+# Metadata untuk pipeline (dibaca script, diabaikan Ultralytics)
+# ─────────────────────────────────────────────────────────────────────────
+
+# Kelas yang kegagalan deteksinya berkonsekuensi keselamatan.
+# Untuk kelas ini, RECALL adalah metrik utama, bukan mAP.
+# Dipakai oleh 05_train_yolo.py (gate rilis) dan 10_tune_thresholds.py.
+hazard_classes: [lubang, got_terbuka, tangga]
+
+# Gate rilis. Angka ini titik awal yang masuk akal untuk aplikasi bantu
+# tunanetra, BUKAN standar industri baku. Sesuaikan setelah uji lapangan
+# dengan pengguna sungguhan.
+release_gates:
+  hazard_recall_min: 0.85
+  hazard_map50_min:  0.55
+  overall_map50_min: 0.60
