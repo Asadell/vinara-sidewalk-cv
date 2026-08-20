@@ -1,0 +1,58 @@
+# guido_cv_training - Pipeline training YOLO11n + PIDNet-S (revisi)
+#
+# Instalasi bertahap. Yang wajib duluan:
+#   pip install -r requirements.txt
+#
+# Untuk GPU, install torch sesuai versi CUDA-mu dari pytorch.org
+# SEBELUM menjalankan baris ini, supaya pip tidak menarik versi CPU.
+
+# ─── Inti ───────────────────────────────────────────────────────────────
+torch>=2.1.0
+torchvision>=0.16.0
+ultralytics>=8.3.0
+numpy>=1.26.0,<2.3.0
+opencv-python-headless>=4.10.0
+PyYAML>=6.0.1
+tqdm>=4.66.0
+Pillow>=10.0.0
+
+# ─── Augmentasi (WAJIB) ─────────────────────────────────────────────────
+# Tanpa ini, augmentasi outdoor (bayangan, hujan, malam, permukaan basah)
+# tidak aktif sama sekali, dan itu justru inti dari revisi pipeline ini.
+# Versi 2.x punya API berbeda dari 1.4.x (num_holes_range, std_range,
+# quality_range, fill/fill_mask). Kode ini ditulis untuk 2.x.
+albumentations>=2.0.0
+
+# ─── Konversi dataset ───────────────────────────────────────────────────
+pycocotools>=2.0.7   # script 04: COCO segmentation -> mask
+lxml>=5.2.0          # script 01: parsing VOC XML
+
+# ─── Ekspor ONNX ────────────────────────────────────────────────────────
+onnx>=1.16.0
+onnxruntime>=1.18.0  # ganti onnxruntime-gpu kalau server punya GPU
+onnxsim>=0.4.36      # simplifikasi graph, memangkas 10-30% node
+onnxscript>=0.1.0    # WAJIB untuk torch>=2.6 (exporter dynamo).
+                     # Tanpa ini torch.onnx.export gagal dengan
+                     # ModuleNotFoundError: No module named 'onnxscript'
+#
+# Catatan: saat ekspor kamu mungkin melihat pesan
+#   "No Adapter To Version $17 for Resize"
+# Itu berasal dari version converter lama dan BUKAN kegagalan; exporter
+# jalur baru tetap menghasilkan graph yang benar. Yang menentukan adalah
+# hasil verifikasi numerik di akhir 07_export_onnx.py, bukan pesan itu.
+
+# ─── Ekspor TFLite (opsional, install kalau memang butuh on-device) ─────
+# PENTING: JANGAN pakai onnx-tf. Paket itu sudah tidak dirawat sejak 2023,
+# tidak kompatibel dengan TensorFlow 2.16+, dan menyisipkan operator
+# Transpose berlebihan yang bisa membuat model 2-5x lebih lambat.
+# onnx2tf dirancang khusus untuk menghindari masalah itu.
+#
+# onnx2tf>=1.22.0
+# onnx-graphsurgeon>=0.5.0
+# sng4onnx>=1.0.4
+# tensorflow>=2.16.0
+#
+# Alternatif yang layak dipertimbangkan: jalankan ONNX langsung di Flutter
+# lewat onnxruntime, melewatkan TFLite sepenuhnya. Ini sejalan dengan
+# rencana migrasi ke ONNX Runtime dan menghapus seluruh kelas masalah
+# konversi NCHW->NHWC.
