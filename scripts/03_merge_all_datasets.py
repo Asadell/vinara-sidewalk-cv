@@ -64,9 +64,20 @@ KEYWORD_MAPPING = {
 
     # Tiang / Obstacle -> 5
     "pole": "tiang",
+    "poles": "tiang",
+    "tiang": "tiang",
     "obstacle": "tiang",
+    "obstacles": "tiang",
     "bollard": "tiang",
+    "bollards": "tiang",
     "post": "tiang",
+    "lamp_post": "tiang",
+    "lamppost": "tiang",
+    "street_pole": "tiang",
+    "utility_pole": "tiang",
+    "electric_pole": "tiang",
+    "hydrant": "tiang",
+    "light_pole": "tiang",
 }
 
 
@@ -300,6 +311,8 @@ def main():
             default_cls = "lubang"
         elif "stair" in folder_name or "step" in folder_name:
             default_cls = "tangga"
+        elif "pole" in folder_name or "tiang" in folder_name or "post" in folder_name or "obstacle" in folder_name:
+            default_cls = "tiang"
 
         has_imgs = any(d.glob("*.jpg")) or any(d.glob("*.png")) or any(d.rglob("*.jpg")) or any(d.rglob("*.png"))
         if has_imgs and ("train" in folder_name or "kaggle" in folder_name or "rf-" in folder_name or "stairs" in folder_name):
