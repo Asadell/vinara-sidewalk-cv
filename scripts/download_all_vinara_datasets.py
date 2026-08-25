@@ -195,28 +195,23 @@ def main():
     
     # Pre-flight checks
     print("\n🔍 Pre-flight checks...")
+    kaggle_available = True
     try:
         subprocess.run(["kaggle", "--version"], capture_output=True, check=True)
         print("  ✓ Kaggle CLI found")
     except:
-        print("  ✗ Kaggle CLI not found. Install: pip install kaggle --break-system-packages")
-        return 1
+        print("  ⚠ Kaggle CLI not found. Kaggle datasets will be skipped.")
+        kaggle_available = False
     
-    # Kaggle mendukung dua format credential:
-    # 1. ~/.kaggle/access_token  (format baru, isi: KGAT_xxxx)
-    # 2. ~/.kaggle/kaggle.json   (format lama, isi: {"username":..., "key":...})
-    kaggle_token  = os.path.expanduser("~/.kaggle/access_token")
-    kaggle_json   = os.path.expanduser("~/.kaggle/kaggle.json")
-    if not os.path.exists(kaggle_token) and not os.path.exists(kaggle_json):
-        print("  ✗ Kaggle credentials tidak ditemukan.")
-        print("    Untuk format baru (KGAT_xxx):")
-        print("      mkdir -p ~/.kaggle && echo 'KGAT_xxxx' > ~/.kaggle/access_token && chmod 600 ~/.kaggle/access_token")
-        print("    Untuk format lama (kaggle.json):")
-        print("      Download dari: https://www.kaggle.com/settings -> API -> Create New Token")
-        return 1
-    else:
-        found = kaggle_token if os.path.exists(kaggle_token) else kaggle_json
-        print(f"  ✓ Kaggle credentials found ({os.path.basename(found)})")
+    if kaggle_available:
+        kaggle_token  = os.path.expanduser("~/.kaggle/access_token")
+        kaggle_json   = os.path.expanduser("~/.kaggle/kaggle.json")
+        if not os.path.exists(kaggle_token) and not os.path.exists(kaggle_json):
+            print("  ⚠ Kaggle credentials not found. Kaggle datasets will be skipped.")
+            kaggle_available = False
+        else:
+            found = kaggle_token if os.path.exists(kaggle_token) else kaggle_json
+            print(f"  ✓ Kaggle credentials found ({os.path.basename(found)})")
     
     if not os.environ.get("ROBOFLOW_API_KEY"):
         print("  ⚠ ROBOFLOW_API_KEY not set (Roboflow datasets will be skipped)")
@@ -228,15 +223,17 @@ def main():
     all_results = {}
     
     # Pothole
-    success, failed = download_kaggle_datasets(kaggle_pothole_datasets, "pothole")
-    all_results["Kaggle Pothole"] = (success, failed)
+    if kaggle_available:
+        success, failed = download_kaggle_datasets(kaggle_pothole_datasets, "pothole")
+        all_results["Kaggle Pothole"] = (success, failed)
     
     success, failed = download_roboflow_datasets(roboflow_pothole_datasets, "pothole")
     all_results["Roboflow Pothole"] = (success, failed)
     
     # Stairs
-    success, failed = download_kaggle_datasets(kaggle_stairs_datasets, "stairs")
-    all_results["Kaggle Stairs"] = (success, failed)
+    if kaggle_available:
+        success, failed = download_kaggle_datasets(kaggle_stairs_datasets, "stairs")
+        all_results["Kaggle Stairs"] = (success, failed)
     
     success, failed = download_roboflow_datasets(roboflow_stairs_datasets, "stairs")
     all_results["Roboflow Stairs"] = (success, failed)
