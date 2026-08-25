@@ -34,6 +34,8 @@ KEYWORD_MAPPING = {
     # Got / Manhole -> 1
     "manhole": "got_terbuka",
     "drain": "got_terbuka",
+    "drain_hole": "got_terbuka",
+    "sewer_cover": "got_terbuka",
     "got_terbuka": "got_terbuka",
     "open_manhole": "got_terbuka",
 
@@ -44,14 +46,18 @@ KEYWORD_MAPPING = {
     "stairs_down": "tangga",
     "stair_up": "tangga",
     "stair_down": "tangga",
+    "stairsup": "tangga",
+    "stairsdown": "tangga",
     "upstairs": "tangga",
     "downstairs": "tangga",
     "step": "tangga",
     "steps": "tangga",
     "stairway": "tangga",
+    "escalera": "tangga",
 
     # Orang -> 3
     "person": "orang",
+    "persona": "orang",
     "pedestrian": "orang",
 
     # Motor / Vehicles -> 4
@@ -78,6 +84,12 @@ KEYWORD_MAPPING = {
     "electric_pole": "tiang",
     "hydrant": "tiang",
     "light_pole": "tiang",
+    "equip_lamp": "tiang",
+    "equip_transformer": "tiang",
+    "pole_hydro": "tiang",
+    "pole_luminaire": "tiang",
+    "pole_signal": "tiang",
+    "pole_transmission": "tiang",
 }
 
 
