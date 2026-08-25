@@ -74,7 +74,11 @@ from src.pidnet.metrics import (  # noqa: E402
     SegmentationMetrics,
     count_class_pixels,
 )
-from src.pidnet.model import PIDNetS, count_parameters  # noqa: E402
+from src.pidnet.model import (  # noqa: E402
+    PIDNetS,
+    count_parameters,
+    load_imagenet_pretrained,
+)
 
 NUM_CLASSES = 3
 
@@ -299,7 +303,29 @@ def main():
 
     ap.add_argument("--epochs", type=int, default=120)
     ap.add_argument("--batch-size", type=int, default=12)
-    ap.add_argument("--img-size", type=int, default=512)
+    # Default (384, 640) SENGAJA cocok dengan app.
+    # lib/services/nav_frame_converter.dart menyiapkan tensor PIDNet
+    # berukuran 640x384 (W x H). Melatih pada 512x512 persegi lalu
+    # menyajikan 640x384 gepeng adalah domain shift geometris yang tidak
+    # akan pernah terlihat di angka mIoU validasi.
+    ap.add_argument("--img-size", type=int, nargs="+", default=[384, 640],
+                    metavar=("H", "W"),
+                    help="Tinggi dan lebar input. Satu angka = persegi. "
+                         "Default 384 640 mengikuti app.")
+    ap.add_argument("--resize-mode", choices=["stretch", "letterbox"],
+                    default="stretch",
+                    help="'stretch' = resize paksa, PERSIS seperti app "
+                         "sekarang. 'letterbox' = jaga aspect ratio lalu pad; "
+                         "pakai ini HANYA kalau sisi Dart juga diubah.")
+    ap.add_argument("--pretrained", dest="pretrained", action="store_true",
+                    default=True,
+                    help="Inisialisasi cabang I dari ResNet-18 ImageNet "
+                         "(default AKTIF). Repo PIDNet resmi selalu berangkat "
+                         "dari backbone pretrained; melatih dari nol dengan "
+                         "1.547 gambar membuang keuntungan terbesar yang "
+                         "tersedia gratis.")
+    ap.add_argument("--no-pretrained", dest="pretrained",
+                    action="store_false")
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--weight-decay", type=float, default=5e-4)
     ap.add_argument("--power", type=float, default=0.9)
@@ -342,6 +368,18 @@ def main():
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
 
+    if len(args.img_size) == 1:
+        img_h = img_w = int(args.img_size[0])
+    elif len(args.img_size) == 2:
+        img_h, img_w = int(args.img_size[0]), int(args.img_size[1])
+    else:
+        ap.error("--img-size menerima satu atau dua angka (H W)")
+    for name, v in (("tinggi", img_h), ("lebar", img_w)):
+        if v % 32 != 0:
+            ap.error(f"--img-size {name}={v} harus kelipatan 32. "
+                     f"Cabang I turun sampai /32, jadi ukuran lain "
+                     f"menghasilkan ketidakcocokan bentuk saat interpolate.")
+
     if not args.name:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         args.name = f"pidnet_s_c{args.base_ch}_e{args.epochs}_{ts}"
@@ -360,20 +398,27 @@ def main():
     print(f"  Dataset  : {dataset_root}")
     print(f"  Device   : {device}")
     print(f"  Epochs   : {args.epochs}  batch: {args.batch_size}  "
-          f"img: {args.img_size}")
+          f"img: {img_h}x{img_w} ({args.resize_mode})")
     print(f"  base_ch  : {args.base_ch}   IBN: {args.use_ibn}")
+    print(f"  KONTRAK PREPROCESSING (harus identik di Flutter):")
+    print(f"    input   : {img_h}x{img_w} (HxW), RGB")
+    print(f"    resize  : {args.resize_mode}"
+          f"{' (resize paksa, tanpa padding)' if args.resize_mode == 'stretch' else ' (jaga rasio + pad)'}")
+    print(f"    normal. : (x/255 - ImageNet mean) / ImageNet std")
     print(f"  Output   : {out_dir}")
 
     # ── Dataset ──
     print("\nMenyiapkan dataset...")
     train_ds = SidewalkSegDataset(
-        str(dataset_root), "train", args.img_size, augment=True,
+        str(dataset_root), "train", (img_h, img_w), augment=True,
+        resize_mode=args.resize_mode,
         aug_strength=args.aug_strength, copy_paste_p=args.copy_paste,
     )
     # Nama split validasi bisa "valid" atau "val" tergantung script konversi
     val_split = "valid" if (dataset_root / "images" / "valid").exists() else "val"
     val_ds = SidewalkSegDataset(
-        str(dataset_root), val_split, args.img_size, augment=False,
+        str(dataset_root), val_split, (img_h, img_w), augment=False,
+        resize_mode=args.resize_mode,
     )
 
     train_loader = DataLoader(
@@ -421,12 +466,20 @@ def main():
         num_classes=NUM_CLASSES, base_ch=args.base_ch,
         use_ibn=args.use_ibn, ibn_ratio=args.ibn_ratio,
         deep_supervision=not args.no_deep_supervision,
-    ).to(device)
+    )
+    n_pre = 0
+    if args.pretrained:
+        n_pre = load_imagenet_pretrained(model)
+    else:
+        print("  [pretrained] DIMATIKAN lewat --no-pretrained. "
+              "Dengan 1.547 gambar train, ini hampir selalu pilihan "
+              "yang lebih buruk.")
+    model = model.to(device)
     n_params, n_m = count_parameters(model)
     print(f"\n  Parameter model: {n_params:,} ({n_m:.2f} M)")
 
     # ── Loss ──
-    px_per_batch = args.batch_size * args.img_size * args.img_size
+    px_per_batch = args.batch_size * img_h * img_w
     min_kept = int(px_per_batch * args.min_kept_frac)
     criterion = BoundaryAwareLoss(
         num_classes=NUM_CLASSES,

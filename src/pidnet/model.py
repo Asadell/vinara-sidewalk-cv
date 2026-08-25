@@ -393,6 +393,169 @@ class PIDNetS(nn.Module):
         return logits, boundary, None
 
 
+# ─── Inisialisasi pretrained ImageNet ──────────────────────────────────────────
+
+def _slice_like(dst_t: torch.Tensor, src_t: torch.Tensor) -> torch.Tensor | None:
+    """
+    Ambil potongan awal `src_t` supaya bentuknya sama dengan `dst_t`.
+
+    Dipakai untuk base_ch < 32, di mana cabang I kita lebih sempit daripada
+    ResNet-18. Mengambil N channel pertama adalah transfer PARSIAL: filter
+    yang terbawa tetap filter terlatih, tapi kombinasinya tidak lagi sama
+    dengan yang dipelajari ResNet. Lebih baik daripada acak, jelas lebih
+    lemah daripada kecocokan persis.
+
+    Return None kalau tidak bisa dipotong (dimensi tujuan lebih besar,
+    atau jumlah dimensinya beda).
+    """
+    if dst_t.dim() != src_t.dim():
+        return None
+    if any(d > s for d, s in zip(dst_t.shape, src_t.shape)):
+        return None
+    idx = tuple(slice(0, d) for d in dst_t.shape)
+    return src_t[idx].clone()
+
+
+def _copy_basicblock(dst: nn.Module, src: nn.Module,
+                     allow_slice: bool = True) -> tuple[int, int]:
+    """
+    Salin bobot satu BasicBlock torchvision ke BasicBlock kita.
+
+    Nama atributnya beda (torchvision pakai bn1/bn2, kita pakai norm1/norm2),
+    jadi pemetaannya eksplisit. Blok yang memakai IBNorm dilewati untuk
+    norm1-nya, karena InstanceNorm tidak punya running stats yang setara.
+
+    Returns:
+        (jumlah tensor disalin persis, jumlah tensor disalin lewat slice)
+    """
+    exact = sliced = 0
+    pairs = [(dst.conv1, src.conv1), (dst.norm1, src.bn1),
+             (dst.conv2, src.conv2), (dst.norm2, src.bn2)]
+    if dst.downsample is not None and src.downsample is not None:
+        pairs += [(dst.downsample[0], src.downsample[0]),
+                  (dst.downsample[1], src.downsample[1])]
+
+    for d, sm in pairs:
+        if type(d) is not type(sm):
+            continue
+        ds, ss = d.state_dict(), sm.state_dict()
+        if set(ds) != set(ss):
+            continue
+
+        if all(ds[k].shape == ss[k].shape for k in ds):
+            d.load_state_dict(ss)
+            exact += len(ds)
+            continue
+
+        if not allow_slice:
+            continue
+        new = {}
+        for k in ds:
+            cut = _slice_like(ds[k], ss[k])
+            if cut is None:
+                new = None
+                break
+            new[k] = cut
+        if new is not None:
+            d.load_state_dict(new)
+            sliced += len(new)
+    return exact, sliced
+
+
+def load_imagenet_pretrained(model: "PIDNetS", verbose: bool = True,
+                             allow_slice: bool = True) -> int:
+    """
+    Inisialisasi cabang I dari ResNet-18 pretrained ImageNet.
+
+    KENAPA INI PENTING (best practice PIDNet yang sebelumnya terlewat)
+    ------------------------------------------------------------------
+    Repo resmi PIDNet (github.com/XuJiacong/PIDNet) SELALU berangkat dari
+    backbone pretrained ImageNet, dan itu bukan detail kosmetik. Untuk
+    segmentasi dengan dataset kecil, pretraining adalah sumber sinyal
+    terbesar kedua setelah datanya sendiri. Dataset seg GUIDIO cuma 1.547
+    gambar train. Melatih ~4,7 juta parameter dari nol dengan data
+    sesedikit itu membuang keuntungan terbesar yang tersedia gratis.
+
+    Kenapa ResNet-18 spesifik: pada base_ch=32, lebar cabang I kita
+    persis sama dengan ResNet-18.
+
+        i_stage1 : 64 -> 128, stride 2   == resnet18.layer2
+        i_stage2 : 128 -> 256, stride 2  == resnet18.layer3
+
+    dan BasicBlock kita punya struktur identik (conv3x3-norm-relu-conv3x3
+    -norm + downsample 1x1). Jadi bobotnya bisa dipindahkan apa adanya.
+
+    Yang TIDAK dipindahkan, dan alasannya:
+      - stem      : ResNet-18 memakai conv 7x7 + maxpool, kita memakai tiga
+                    conv 3x3. Bentuknya tidak cocok sama sekali.
+      - cabang P/D: sebagian blok memakai IBNorm, sementara ResNet memakai
+                    BatchNorm murni. Blok yang tidak cocok dilewati diam-diam
+                    oleh pengecekan tipe di _copy_basicblock().
+      - i_stage3  : Bottleneck, bukan BasicBlock.
+
+BASE_CH SELAIN 32
+    -----------------
+    Pada base_ch=16 cabang I kita separuh lebar ResNet-18 (32->64 dan
+    64->128). Bobotnya tetap dipakai lewat pemotongan channel: ambil N
+    channel pertama dari tiap tensor. Itu transfer PARSIAL, jelas lebih
+    lemah daripada kecocokan persis, tapi tetap lebih baik daripada
+    inisialisasi acak. Script mencetak berapa yang persis dan berapa yang
+    dipotong, supaya kamu tahu mana yang kamu dapat.
+
+    Ini penting karena README merekomendasikan base_ch=16 untuk target
+    2 FPS di HP mid-low, sementara kecocokan persis hanya ada di base_ch=32.
+    Tanpa pemotongan, justru konfigurasi yang paling mungkin kamu deploy
+    yang tidak kebagian pretraining sama sekali.
+
+    Aman dipanggil kapan pun: kalau torchvision tidak tersedia, atau tidak
+    ada koneksi untuk mengunduh bobot, fungsi ini memberi peringatan dan
+    mengembalikan 0 tanpa mengubah apa pun.
+
+    Returns:
+        jumlah tensor yang berhasil disalin (0 = tidak ada)
+    """
+    try:
+        from torchvision.models import ResNet18_Weights, resnet18
+    except Exception as exc:
+        if verbose:
+            print(f"  [pretrained] torchvision tidak tersedia ({exc}). "
+                  f"Backbone dilatih dari nol.")
+        return 0
+
+    try:
+        r18 = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+    except Exception as exc:
+        if verbose:
+            print(f"  [pretrained] gagal mengambil bobot ResNet-18 ({exc}). "
+                  f"Backbone dilatih dari nol.\n"
+                  f"               Di mesin tanpa internet, unduh dulu "
+                  f"lalu set TORCH_HOME.")
+        return 0
+
+    exact = sliced = 0
+    for ours, theirs in ((model.i_stage1, r18.layer2),
+                         (model.i_stage2, r18.layer3)):
+        for d, sm in zip(ours, theirs):
+            if isinstance(d, BasicBlock):
+                e, s_ = _copy_basicblock(d, sm, allow_slice=allow_slice)
+                exact += e
+                sliced += s_
+
+    copied = exact + sliced
+    if verbose:
+        if copied:
+            print(f"  [pretrained] {copied} tensor ResNet-18 ImageNet dimuat "
+                  f"ke cabang I ({exact} persis, {sliced} dipotong).")
+            if sliced and not exact:
+                print("               Semua lewat pemotongan channel karena "
+                      "base_ch != 32. Transfer parsial, tetap lebih baik "
+                      "daripada dari nol.")
+        else:
+            print("  [pretrained] TIDAK ADA tensor yang cocok, backbone dari "
+                  "nol.")
+    return copied
+
+
 # ─── Utilitas ──────────────────────────────────────────────────────────────────
 
 class InferenceWrapper(nn.Module):

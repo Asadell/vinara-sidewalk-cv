@@ -91,10 +91,19 @@ def load_model_from_checkpoint(ckpt_path: Path, device: torch.device):
     return model, ckpt
 
 
-def export(model, img_size: int, out_path: Path, opset: int = 17,
+def _hw(img_size) -> tuple[int, int]:
+    """Terima int, [S], atau [H, W]; kembalikan (H, W)."""
+    if isinstance(img_size, int):
+        return img_size, img_size
+    v = list(img_size)
+    return (v[0], v[0]) if len(v) == 1 else (v[0], v[1])
+
+
+def export(model, img_size, out_path: Path, opset: int = 17,
            dynamic_hw: bool = False, apply_softmax: bool = False) -> None:
     wrapper = InferenceWrapper(model, apply_softmax=apply_softmax).eval()
-    dummy = torch.randn(1, 3, img_size, img_size)
+    ih, iw = _hw(img_size)
+    dummy = torch.randn(1, 3, ih, iw)
 
     dynamic_axes = {"input": {0: "batch"}, "output": {0: "batch"}}
     if dynamic_hw:
@@ -139,7 +148,7 @@ def simplify(onnx_path: Path) -> bool:
         return False
 
 
-def verify(model, onnx_path: Path, img_size: int,
+def verify(model, onnx_path: Path, img_size,
            apply_softmax: bool, tol: float = 1e-3) -> dict:
     """
     Bandingkan output PyTorch vs onnxruntime.
@@ -163,7 +172,8 @@ def verify(model, onnx_path: Path, img_size: int,
     argmax_agree_all = []
 
     for trial in range(3):
-        x = rng.standard_normal((1, 3, img_size, img_size)).astype(np.float32)
+        ih, iw = _hw(img_size)
+        x = rng.standard_normal((1, 3, ih, iw)).astype(np.float32)
 
         with torch.no_grad():
             wrapper = InferenceWrapper(model, apply_softmax=apply_softmax).eval()
@@ -203,7 +213,7 @@ def verify(model, onnx_path: Path, img_size: int,
     }
 
 
-def benchmark(onnx_path: Path, img_size: int, n_runs: int = 20) -> dict:
+def benchmark(onnx_path: Path, img_size, n_runs: int = 20) -> dict:
     try:
         import onnxruntime as ort
     except ImportError:
@@ -211,7 +221,8 @@ def benchmark(onnx_path: Path, img_size: int, n_runs: int = 20) -> dict:
 
     sess = ort.InferenceSession(str(onnx_path),
                                 providers=["CPUExecutionProvider"])
-    x = np.random.randn(1, 3, img_size, img_size).astype(np.float32)
+    ih, iw = _hw(img_size)
+    x = np.random.randn(1, 3, ih, iw).astype(np.float32)
 
     for _ in range(3):
         sess.run(["output"], {"input": x})
@@ -242,7 +253,13 @@ def main():
     ap = argparse.ArgumentParser(description="Ekspor PIDNet-S ke ONNX")
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--output", default=None)
-    ap.add_argument("--img-size", type=int, default=512)
+    # Default (384, 640) mengikuti app: nav_frame_converter.dart menyiapkan
+    # tensor PIDNet 640x384. Ekspor pada bentuk lain berarti model di HP
+    # menerima geometri yang tidak pernah dilihatnya saat training.
+    ap.add_argument("--img-size", type=int, nargs="+", default=[384, 640],
+                    metavar=("H", "W"),
+                    help="Tinggi dan lebar. Satu angka = persegi. "
+                         "Default 384 640 mengikuti app.")
     ap.add_argument("--opset", type=int, default=17)
     ap.add_argument("--dynamic-hw", action="store_true",
                     help="Izinkan tinggi/lebar dinamis (lebih fleksibel, "
@@ -269,7 +286,8 @@ def main():
     print("=" * 66)
     print(f"  Checkpoint : {ckpt_path}")
     print(f"  Output     : {out_path}")
-    print(f"  img_size   : {args.img_size}   opset: {args.opset}")
+    print(f"  img_size   : {_hw(args.img_size)[0]}x{_hw(args.img_size)[1]} "
+          f"(HxW)   opset: {args.opset}")
 
     model, ckpt = load_model_from_checkpoint(ckpt_path, device)
     n_params, n_m = count_parameters(model)
@@ -284,7 +302,7 @@ def main():
         simplify(out_path)
 
     report = {"checkpoint": str(ckpt_path), "onnx": str(out_path),
-              "img_size": args.img_size, "opset": args.opset,
+              "img_size": list(_hw(args.img_size)), "opset": args.opset,
               "softmax_in_graph": args.softmax,
               "dynamic_hw": args.dynamic_hw}
 

@@ -70,16 +70,28 @@ IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 # ─── Kalibrasi ─────────────────────────────────────────────────────────────────
 
-def build_calibration_array(data_root: Path, img_size: int,
-                            n_samples: int) -> np.ndarray | None:
+def _hw(img_size) -> tuple[int, int]:
+    """Terima int, [S], atau [H, W]; kembalikan (H, W)."""
+    if isinstance(img_size, int):
+        return img_size, img_size
+    v = list(img_size)
+    return (v[0], v[0]) if len(v) == 1 else (v[0], v[1])
+
+
+def build_calibration_array(data_root: Path, img_size,
+                            n_samples: int,
+                            resize_mode: str = "stretch") -> np.ndarray | None:
     """
     Bangun array kalibrasi INT8 dari gambar dataset asli.
 
     PENTING: preprocessing di sini harus SAMA PERSIS dengan
-    src/pidnet/dataset.py (letterbox + normalisasi ImageNet). Kalau
-    kalibrasi melihat distribusi yang berbeda dari yang dilihat model
-    saat training, rentang quantization-nya meleset dan akurasi INT8
-    anjlok tanpa sebab yang terlihat.
+    src/pidnet/dataset.py DAN dengan sisi Flutter. Kalau kalibrasi melihat
+    distribusi yang berbeda dari yang dilihat model saat training, rentang
+    quantization-nya meleset dan akurasi INT8 anjlok tanpa sebab terlihat.
+
+    Versi sebelumnya SELALU letterbox ke persegi, padahal
+    nav_frame_converter.dart di app melakukan resize paksa ke 640x384
+    tanpa padding sama sekali. Sekarang mode-nya mengikuti training.
 
     onnx2tf mengharapkan data kalibrasi dalam tata letak NHWC.
     """
@@ -111,15 +123,17 @@ def build_calibration_array(data_root: Path, img_size: int,
             continue
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-        h, w = img.shape[:2]
-        scale = img_size / max(h, w)
-        nh, nw = int(round(h * scale)), int(round(w * scale))
-        resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
-
-        canvas = np.zeros((img_size, img_size, 3), dtype=np.uint8)
-        top = (img_size - nh) // 2
-        left = (img_size - nw) // 2
-        canvas[top:top + nh, left:left + nw] = resized
+        ih, iw = _hw(img_size)
+        if resize_mode == "stretch":
+            canvas = cv2.resize(img, (iw, ih), interpolation=cv2.INTER_LINEAR)
+        else:
+            h, w = img.shape[:2]
+            scale = min(ih / h, iw / w)
+            nh, nw = int(round(h * scale)), int(round(w * scale))
+            resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
+            canvas = np.zeros((ih, iw, 3), dtype=np.uint8)
+            canvas[(ih - nh) // 2:(ih - nh) // 2 + nh,
+                   (iw - nw) // 2:(iw - nw) // 2 + nw] = resized
 
         norm = (canvas.astype(np.float32) / 255.0 - IMAGENET_MEAN) / IMAGENET_STD
         batch.append(norm)
@@ -284,7 +298,13 @@ def main():
     ap.add_argument("--onnx", default=None,
                     help="Pakai file ONNX yang sudah ada")
     ap.add_argument("--out-dir", default=None)
-    ap.add_argument("--img-size", type=int, default=512)
+    ap.add_argument("--img-size", type=int, nargs="+", default=[384, 640],
+                    metavar=("H", "W"),
+                    help="Tinggi dan lebar. Satu angka = persegi. "
+                         "Default 384 640 mengikuti app.")
+    ap.add_argument("--resize-mode", choices=["stretch", "letterbox"],
+                    default="stretch",
+                    help="HARUS sama dengan yang dipakai saat training.")
     ap.add_argument("--int8", action="store_true",
                     help="Hasilkan varian INT8 (butuh --calib-data)")
     ap.add_argument("--calib-data", default=None,
@@ -316,7 +336,7 @@ def main():
                 sys.executable, str(ROOT / "scripts" / "07_export_onnx.py"),
                 "--checkpoint", str(ckpt),
                 "--output", str(onnx_path),
-                "--img-size", str(args.img_size),
+                "--img-size", *[str(v) for v in args.img_size],
                 "--simplify",
             ]
             r = subprocess.run(cmd)
@@ -364,7 +384,8 @@ def main():
             sys.exit(1)
         print("\nMenyiapkan data kalibrasi INT8...")
         calib = build_calibration_array(Path(args.calib_data),
-                                        args.img_size, args.calib_samples)
+                                        args.img_size, args.calib_samples,
+                                        args.resize_mode)
         if calib is None:
             print("  Kalibrasi gagal disiapkan.")
             sys.exit(1)
@@ -421,8 +442,13 @@ def main():
     print(f"\n  Semua file: {out_dir.resolve()}")
     print("\n  Kontrak preprocessing di Flutter (WAJIB sama dengan training):")
     print("    1. BGR/YUV kamera -> RGB")
-    print(f"    2. Resize jaga aspect ratio ke sisi terpanjang {args.img_size}")
-    print(f"    3. Pad ke {args.img_size}x{args.img_size} di TENGAH, nilai 0")
+    _ih, _iw = _hw(args.img_size)
+    if args.resize_mode == "stretch":
+        print(f"    2. Resize PAKSA ke {_ih}x{_iw} (HxW), tanpa padding")
+        print(f"    3. (tidak ada langkah padding)")
+    else:
+        print(f"    2. Resize jaga aspect ratio agar muat {_ih}x{_iw}")
+        print(f"    3. Pad ke {_ih}x{_iw} di TENGAH, nilai 0")
     print("    4. /255, lalu (x - [0.485,0.456,0.406]) / [0.229,0.224,0.225]")
     print("    5. Tata letak NHWC (TFLite), float32")
 

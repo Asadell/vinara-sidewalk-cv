@@ -70,14 +70,19 @@ IMG_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 # ─── Augmentasi ────────────────────────────────────────────────────────────────
 
-def build_seg_train_transform(img_size: int, strength: str = "medium",
-                              scale_range=(0.5, 1.6)):
+def build_seg_train_transform(img_h: int, img_w: int,
+                              strength: str = "medium",
+                              scale_range=(0.5, 1.6),
+                              resize_mode: str = "stretch"):
     """
     Pipeline augmentasi training untuk segmentasi.
 
     Urutan sengaja: geometri dulu (di resolusi asli, supaya distorsinya
     natural), baru fotometrik, baru degradasi optik. Kalau blur diterapkan
     sebelum resize, kekuatan blur-nya jadi salah skala.
+
+    BENTUK OUTPUT SEKARANG (img_h, img_w), BUKAN PERSEGI.
+    Alasannya ada di catatan panjang di build_seg_eval_transform().
     """
     if not HAS_ALBUMENTATIONS:
         raise ImportError("albumentations belum terinstall.")
@@ -115,10 +120,24 @@ def build_seg_train_transform(img_size: int, strength: str = "medium",
             fill_mask=IGNORE_INDEX,
             p=0.3,
         ),
-        A.PadIfNeeded(min_height=img_size, min_width=img_size,
-                      border_mode=cv2.BORDER_CONSTANT,
-                      fill=0, fill_mask=IGNORE_INDEX),
-        A.RandomCrop(height=img_size, width=img_size),
+        # Bentuk akhir dibuat SAMA dengan yang dipakai app.
+        #   stretch   : resize paksa ke (img_h, img_w), aspect ratio berubah.
+        #               Ini yang dilakukan NavFrameConverter di Flutter.
+        #   letterbox : jaga aspect ratio lalu pad. Lebih "benar" secara
+        #               geometris, tapi TIDAK cocok dengan app saat ini.
+        *(
+            [A.Resize(height=img_h, width=img_w,
+                      interpolation=cv2.INTER_LINEAR,
+                      mask_interpolation=cv2.INTER_NEAREST)]
+            if resize_mode == "stretch" else
+            [A.LongestMaxSize(max_size_hw=(img_h, img_w),
+                              interpolation=cv2.INTER_LINEAR,
+                              mask_interpolation=cv2.INTER_NEAREST),
+             A.PadIfNeeded(min_height=img_h, min_width=img_w,
+                           border_mode=cv2.BORDER_CONSTANT,
+                           fill=0, fill_mask=IGNORE_INDEX),
+             A.RandomCrop(height=img_h, width=img_w)]
+        ),
 
         # ── Fotometrik ────────────────────────────────────────────────────
         A.RandomBrightnessContrast(brightness_limit=(-0.32, 0.28),
@@ -156,23 +175,59 @@ def build_seg_train_transform(img_size: int, strength: str = "medium",
     ], p=1.0, seed=None)
 
 
-def build_seg_eval_transform(img_size: int):
+def build_seg_eval_transform(img_h: int, img_w: int,
+                             resize_mode: str = "stretch"):
     """
-    Val/test: resize menjaga aspect ratio lalu pad. Tidak ada augmentasi.
+    Val/test: bentuk ulang ke (img_h, img_w). Tidak ada augmentasi.
 
-    Pakai LongestMaxSize + PadIfNeeded, bukan Resize ke persegi, supaya
-    geometri perspektif trotoar tidak terdistorsi. Ini harus SAMA PERSIS
-    dengan preprocessing di sisi Flutter, kalau tidak akurasi produksi
-    akan berbeda dari akurasi validasi tanpa sebab yang jelas.
+    KENAPA DEFAULTNYA "stretch" DAN BUKAN LAGI PERSEGI
+    ---------------------------------------------------
+    Docstring versi sebelumnya menulis "Ini harus SAMA PERSIS dengan
+    preprocessing di sisi Flutter". Niatnya benar, tapi waktu diperiksa
+    ternyata TIDAK sama, dan bedanya ada dua lapis sekaligus:
+
+      training lama : LongestMaxSize + PadIfNeeded  -> PERSEGI 512x512,
+                      aspect ratio dijaga, sisanya bar padding
+      app (Flutter) : lib/services/nav_frame_converter.dart melakukan
+                          sxUpright = tx * uprightW / _pidW
+                          syUpright = ty * uprightH / _pidH
+                      yaitu resize PAKSA ke 640x384, tanpa padding sama
+                      sekali, aspect ratio berubah
+
+    Jadi model dilatih melihat trotoar beraspek asli di tengah kanvas
+    persegi berbingkai hitam, lalu di lapangan diberi trotoar yang
+    gepeng memenuhi bingkai 640x384. Itu domain shift geometris yang
+    tidak akan pernah muncul di angka mIoU validasi.
+
+    Default sekarang mengikuti app. Kalau nanti sisi Dart diubah jadi
+    letterbox, pindahkan flag --resize-mode ke "letterbox" supaya
+    keduanya tetap sinkron.
+
+    Args:
+        img_h, img_w: tinggi & lebar output (app memakai 384 x 640)
+        resize_mode: "stretch" (ikut app) atau "letterbox"
     """
     if not HAS_ALBUMENTATIONS:
         raise ImportError("albumentations belum terinstall.")
+    if resize_mode == "stretch":
+        return A.Compose([
+            A.Resize(height=img_h, width=img_w,
+                     interpolation=cv2.INTER_LINEAR,
+                     mask_interpolation=cv2.INTER_NEAREST),
+        ], p=1.0)
     return A.Compose([
-        A.LongestMaxSize(max_size=img_size, interpolation=cv2.INTER_LINEAR),
-        A.PadIfNeeded(min_height=img_size, min_width=img_size,
+        # max_size_hw, BUKAN max_size. Dengan max_size=max(h, w), gambar
+        # 480x640 yang ditarget 384x640 tidak berubah sama sekali (sisi
+        # terpanjangnya sudah 640), lalu PadIfNeeded juga diam karena
+        # 480 >= 384. Hasilnya 480x640: bentuk salah, tanpa error apa pun.
+        A.LongestMaxSize(max_size_hw=(img_h, img_w),
+                         interpolation=cv2.INTER_LINEAR,
+                         mask_interpolation=cv2.INTER_NEAREST),
+        A.PadIfNeeded(min_height=img_h, min_width=img_w,
                       position="center",
                       border_mode=cv2.BORDER_CONSTANT,
                       fill=0, fill_mask=IGNORE_INDEX),
+        A.CenterCrop(height=img_h, width=img_w),
     ], p=1.0)
 
 
@@ -274,22 +329,28 @@ class SidewalkSegDataset(Dataset):
     Args:
         root: folder dataset_master_seg
         split: "train" | "valid" | "test"
-        img_size: sisi output persegi
+        img_size: (tinggi, lebar) output. int juga diterima -> persegi.
+        resize_mode: "stretch" (cocok dengan app) atau "letterbox"
         augment: aktifkan augmentasi (otomatis mati kecuali split=train)
         aug_strength: "light" | "medium" | "heavy"
         copy_paste_p: probabilitas copy-paste hazard (0 = matikan)
         cache_pool_size: jumlah gambar hazard yang di-cache untuk copy-paste
     """
 
-    def __init__(self, root: str, split: str = "train", img_size: int = 512,
+    def __init__(self, root: str, split: str = "train",
+                 img_size: int | tuple[int, int] = (384, 640),
                  augment: bool = False, aug_strength: str = "medium",
                  copy_paste_p: float = 0.0, cache_pool_size: int = 120,
-                 scale_range=(0.5, 1.6)):
+                 scale_range=(0.5, 1.6), resize_mode: str = "stretch"):
         self.root = Path(root)
         self.split = split
         self.img_dir = self.root / "images" / split
         self.mask_dir = self.root / "masks" / split
-        self.img_size = img_size
+        if isinstance(img_size, int):
+            img_size = (img_size, img_size)
+        self.img_h, self.img_w = int(img_size[0]), int(img_size[1])
+        self.img_size = (self.img_h, self.img_w)
+        self.resize_mode = resize_mode
         self.augment = augment and split == "train"
 
         if not self.img_dir.exists():
@@ -316,9 +377,11 @@ class SidewalkSegDataset(Dataset):
 
         if self.augment:
             self.transform = build_seg_train_transform(
-                img_size, aug_strength, scale_range)
+                self.img_h, self.img_w, aug_strength, scale_range,
+                resize_mode)
         else:
-            self.transform = build_seg_eval_transform(img_size)
+            self.transform = build_seg_eval_transform(
+                self.img_h, self.img_w, resize_mode)
 
         self.copy_paste = None
         if self.augment and copy_paste_p > 0:
